@@ -2,6 +2,7 @@ package okta
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -29,6 +30,15 @@ func resourceAuthServerPolicyRule() *schema.Resource {
 						return fmt.Errorf(`at least "user_whitelist" or "group_whitelist" should be provided when using '%s' in "grant_type_whitelist"`, implicit)
 					}
 				}
+			}
+			rtlm := d.Get("refresh_token_lifetime_minutes").(int)
+			atlm := d.Get("access_token_lifetime_minutes").(int)
+			rtwm := d.Get("refresh_token_window_minutes").(int)
+			if rtlm > 0 && rtlm < atlm {
+				return errors.New("'refresh_token_lifetime_minutes' must be greater than or equal to 'access_token_lifetime_minutes'")
+			}
+			if rtlm > 0 && (atlm > rtwm || rtlm < rtwm) {
+				return errors.New("'refresh_token_window_minutes' must be between 'access_token_lifetime_minutes' and 'refresh_token_lifetime_minutes'")
 			}
 			return nil
 		},
@@ -77,7 +87,7 @@ func resourceAuthServerPolicyRule() *schema.Resource {
 			"access_token_lifetime_minutes": {
 				Type:     schema.TypeInt,
 				Optional: true,
-				// 5 mins - 1 day
+				// 5 minutes - 1 day
 				ValidateDiagFunc: intBetween(5, 1440),
 				Default:          60,
 			},
@@ -88,8 +98,8 @@ func resourceAuthServerPolicyRule() *schema.Resource {
 			"refresh_token_window_minutes": {
 				Type:     schema.TypeInt,
 				Optional: true,
-				// 10 mins - 5 years
-				ValidateDiagFunc: intBetween(10, 2628000),
+				// 5 minutes - 5 years
+				ValidateDiagFunc: intBetween(5, 2628000),
 				Default:          10080,
 			},
 			"inline_hook_id": {
@@ -233,8 +243,8 @@ func buildAuthServerPolicyRule(d *schema.ResourceData) *sdk.AuthorizationServerP
 			},
 		},
 		Conditions: &sdk.AuthorizationServerPolicyRuleConditions{
-			GrantTypes: &sdk.Whitelist{Include: convertInterfaceToStringSet(d.Get("grant_type_whitelist"))},
-			Scopes:     &sdk.Whitelist{Include: convertInterfaceToStringSet(d.Get("scope_whitelist"))},
+			GrantTypes: &sdk.Conditions{Include: convertInterfaceToStringSet(d.Get("grant_type_whitelist"))},
+			Scopes:     &sdk.Conditions{Include: convertInterfaceToStringSet(d.Get("scope_whitelist"))},
 			People:     getPeopleConditions(d),
 		},
 	}

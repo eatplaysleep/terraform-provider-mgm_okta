@@ -145,47 +145,6 @@ var baseAppSwaSchema = map[string]*schema.Schema{
 	},
 }
 
-var attributeStatements = map[string]*schema.Schema{
-	"filter_type": {
-		Type:        schema.TypeString,
-		Optional:    true,
-		Description: "Type of group attribute filter",
-	},
-	"filter_value": {
-		Type:        schema.TypeString,
-		Optional:    true,
-		Description: "Filter value to use",
-	},
-	"name": {
-		Type:     schema.TypeString,
-		Required: true,
-	},
-	"namespace": {
-		Type:     schema.TypeString,
-		Optional: true,
-		Default:  "urn:oasis:names:tc:SAML:2.0:attrname-format:unspecified",
-		ValidateDiagFunc: stringInSlice([]string{
-			"urn:oasis:names:tc:SAML:2.0:attrname-format:unspecified",
-			"urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
-			"urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
-		}),
-	},
-	"type": {
-		Type:     schema.TypeString,
-		Optional: true,
-		Default:  "EXPRESSION",
-		ValidateDiagFunc: stringInSlice([]string{
-			"EXPRESSION",
-			"GROUP",
-		}),
-	},
-	"values": {
-		Type:     schema.TypeList,
-		Optional: true,
-		Elem:     &schema.Schema{Type: schema.TypeString},
-	},
-}
-
 var appSamlDiffSuppressFunc = func(k, old, new string, d *schema.ResourceData) bool {
 	// Conditional default
 	return new == "" && old == "http://www.okta.com/${org.externalKey}"
@@ -326,6 +285,18 @@ func containsAppUser(userList []*okta.AppUser, id string) bool {
 	return false
 }
 
+func shouldUpdateUser(userList []*okta.AppUser, id, username string) bool {
+	for _, user := range userList {
+		if user.Id == id &&
+			user.Scope == userScope &&
+			user.Credentials != nil &&
+			user.Credentials.UserName != username {
+			return true
+		}
+	}
+	return false
+}
+
 // Handles the assigning of groups and users to Applications. Does so asynchronously.
 func handleAppGroupsAndUsers(ctx context.Context, id string, d *schema.ResourceData, m interface{}) error {
 	var wg sync.WaitGroup
@@ -353,17 +324,14 @@ func handleAppUsers(ctx context.Context, id string, d *schema.ResourceData, clie
 	if set, ok := d.GetOk("users"); ok {
 		users = set.(*schema.Set).List()
 		userIDList = make([]string, len(users))
-
 		for i, user := range users {
 			userProfile := user.(map[string]interface{})
 			uID := userProfile["id"].(string)
+			username := userProfile["username"].(string)
 			userIDList[i] = uID
-
+			// Not required
+			password, _ := userProfile["password"].(string)
 			if !containsAppUser(existingUsers, uID) {
-				username := userProfile["username"].(string)
-				// Not required
-				password, _ := userProfile["password"].(string)
-
 				asyncActionList = append(asyncActionList, func() error {
 					_, _, err := client.Application.AssignUserToApplication(ctx, id, okta.AppUser{
 						Id: uID,
@@ -374,7 +342,19 @@ func handleAppUsers(ctx context.Context, id string, d *schema.ResourceData, clie
 							},
 						},
 					})
-
+					return err
+				})
+			} else if shouldUpdateUser(existingUsers, uID, username) {
+				asyncActionList = append(asyncActionList, func() error {
+					_, _, err := client.Application.UpdateApplicationUser(ctx, id, uID, okta.AppUser{
+						Id: uID,
+						Credentials: &okta.AppUserCredentials{
+							UserName: username,
+							Password: &okta.AppUserPasswordCredential{
+								Value: password,
+							},
+						},
+					})
 					return err
 				})
 			}
@@ -407,6 +387,7 @@ func setAppStatus(ctx context.Context, d *schema.ResourceData, client *okta.Clie
 }
 
 func syncGroupsAndUsers(ctx context.Context, id string, d *schema.ResourceData, m interface{}) error {
+	ctx = context.WithValue(ctx, retryOnNotFoundKey, true)
 	client := getOktaClientFromMetadata(m)
 	// Temporary high limit to avoid issues short term. Need to support pagination here
 	userList, _, err := client.Application.ListApplicationUsers(ctx, id, &query.Params{Limit: defaultPaginationLimit})
@@ -428,9 +409,18 @@ func syncGroupsAndUsers(ctx context.Context, id string, d *schema.ResourceData, 
 
 	for _, user := range userList {
 		if user.Scope == userScope {
+			var un, up string
+			if user.Credentials != nil {
+				un = user.Credentials.UserName
+				if user.Credentials.Password != nil {
+					up = user.Credentials.Password.Value
+				}
+			}
 			flattenedUserList = append(flattenedUserList, map[string]interface{}{
 				"id":       user.Id,
-				"username": user.Credentials.UserName,
+				"username": un,
+				"scope":    user.Scope,
+				"password": up,
 			})
 		}
 	}
@@ -507,7 +497,13 @@ func setSamlSettings(d *schema.ResourceData, signOn *okta.SamlApplicationSetting
 			"filter_value": st.FilterValue,
 		}
 	}
-
+	if signOn.Slo != nil && signOn.Slo.Enabled != nil && *signOn.Slo.Enabled {
+		_ = d.Set("single_logout_issuer", signOn.Slo.Issuer)
+		_ = d.Set("single_logout_url", signOn.Slo.LogoutUrl)
+		if len(signOn.SpCertificate.X5c) > 0 {
+			_ = d.Set("single_logout_certificate", signOn.SpCertificate.X5c[0])
+		}
+	}
 	return setNonPrimitives(d, map[string]interface{}{
 		"attribute_statements": arr,
 	})

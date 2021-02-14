@@ -30,6 +30,9 @@ type (
 		orgName          string
 		domain           string
 		apiToken         string
+		clientID         string
+		privateKey       string
+		scopes           []string
 		retryCount       int
 		parallelism      int
 		backoff          bool
@@ -57,31 +60,37 @@ func (c *Config) loadAndValidate() error {
 		retryableClient.Logger = c.logger
 		retryableClient.HTTPClient.Transport = logging.NewTransport("Okta", retryableClient.HTTPClient.Transport)
 		retryableClient.ErrorHandler = errHandler
+		retryableClient.CheckRetry = checkRetry
 		httpClient = retryableClient.StandardClient()
 	} else {
 		httpClient = cleanhttp.DefaultClient()
 		httpClient.Transport = logging.NewTransport("Okta", httpClient.Transport)
 	}
-
-	_, client, err := okta.NewClient(
-		context.Background(),
+	setters := []okta.ConfigSetter{
 		okta.WithOrgUrl(fmt.Sprintf("https://%v.%v", c.orgName, c.domain)),
 		okta.WithToken(c.apiToken),
+		okta.WithClientId(c.clientID),
+		okta.WithPrivateKey(c.privateKey),
+		okta.WithScopes(c.scopes),
 		okta.WithCache(false),
 		okta.WithHttpClient(*httpClient),
 		okta.WithRateLimitMaxBackOff(int64(c.maxWait)),
 		okta.WithRequestTimeout(int64(c.requestTimeout)),
 		okta.WithRateLimitMaxRetries(int32(c.retryCount)),
-		okta.WithUserAgentExtra("okta-terraform/3.7.4"),
+		okta.WithUserAgentExtra("okta-terraform/3.9.0"),
+	}
+	if c.apiToken == "" {
+		setters = append(setters, okta.WithAuthorizationMode("PrivateKey"))
+	}
+	_, client, err := okta.NewClient(
+		context.Background(),
+		setters...,
 	)
 	if err != nil {
 		return err
 	}
 	c.oktaClient = client
 	c.supplementClient = &sdk.ApiSupplement{
-		BaseURL:         fmt.Sprintf("https://%s.%s", c.orgName, c.domain),
-		Client:          httpClient,
-		Token:           c.apiToken,
 		RequestExecutor: client.GetRequestExecutor(),
 	}
 	return nil
@@ -102,4 +111,25 @@ func errHandler(resp *http.Response, err error, numTries int) (*http.Response, e
 		return resp, fmt.Errorf("%v: giving up after %d attempt(s)", err, numTries)
 	}
 	return resp, nil
+}
+
+type contextKey string
+
+const retryOnNotFoundKey contextKey = "retryOnNotFound"
+
+// Used to make http client retry on 404 response status code
+//
+// To enable this check, inject `retryOnNotFoundKey` key into the context with value == 'true'
+// 		ctx = context.WithValue(ctx, retryOnNotFoundKey, true)
+//
+func checkRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	// do not retry on context.Canceled or context.DeadlineExceeded
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	retry, ok := ctx.Value(retryOnNotFoundKey).(bool)
+	if ok && retry && resp != nil && resp.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 }

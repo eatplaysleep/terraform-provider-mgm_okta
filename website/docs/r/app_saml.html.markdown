@@ -92,7 +92,7 @@ The following arguments are supported:
 
 - `accessibility_login_redirect_url` - (Optional) Custom login page URL.
 
-- `features` - (Optional) features enabled.
+- `features` - (Optional) features enabled. Notice: you can't currently configure provisioning features via the API.
 
 - `user_name_template` - (Optional) Username template.
 
@@ -104,13 +104,28 @@ The following arguments are supported:
 
 - `acs_endpoints` - An array of ACS endpoints. You can configure a maximum of 100 endpoints.
 
+- `users` - (Optional) Users associated with the application.
+
+- `groups` - (Optional) Groups associated with the application.
+
 - `attribute_statements` - (Optional) List of SAML Attribute statements.
   - `name` - (Required) The name of the attribute statement.
-  - `filter_type` - (Optional) Type of group attribute filter.
+  - `filter_type` - (Optional) Type of group attribute filter. Valid values are: `"STARTS_WITH"`, `"EQUALS"`, `"CONTAINS"`, or `"REGEX"`
   - `filter_value` - (Optional) Filter value to use.
   - `namespace` - (Optional) The attribute namespace. It can be set to `"urn:oasis:names:tc:SAML:2.0:attrname-format:unspecified"`, `"urn:oasis:names:tc:SAML:2.0:attrname-format:uri"`, or `"urn:oasis:names:tc:SAML:2.0:attrname-format:basic"`.
-  - `type` - (Optional) The type of attribute statement value. Can be `"EXPRESSION"` or `"GROUP"`.
+  - `type` - (Optional) The type of attribute statement value. Valid values are: `"EXPRESSION"` or `"GROUP"`. Default is `"EXPRESSION"`.
   - `values` - (Optional) Array of values to use.
+
+- `key_years_valid` - (Optional) Number of years the certificate is valid (2 - 10 years).
+
+- `key_name` - (Optional) Certificate name. This modulates the rotation of keys. New name == new key. Required to be set with `key_years_valid`.
+
+- `single_logout_issuer` - (Optional) The issuer of the Service Provider that generates the Single Logout request.
+
+- `single_logout_url` - (Optional) The location where the logout response is sent.
+
+- `single_logout_certificate` - (Optional) x509 encoded certificate that the Service Provider uses to sign Single Logout requests. 
+  Note: should be provided without `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----`, see [official documentation](https://developer.okta.com/docs/reference/api/apps/#service-provider-certificate).
 
 ## Attributes Reference
 
@@ -127,6 +142,8 @@ The following arguments are supported:
 - `certificate` - The raw signing certificate.
 
 - `metadata` - The raw SAML metadata in XML.
+
+- `metadata_url` - SAML xml metadata URL.
 
 - `http_post_binding` - `urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Post` location from the SAML metadata.
 

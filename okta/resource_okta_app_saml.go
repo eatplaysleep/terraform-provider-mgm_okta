@@ -3,11 +3,9 @@ package okta
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 
-	"github.com/crewjam/saml"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/okta/okta-sdk-golang/v2/okta"
@@ -20,7 +18,7 @@ const (
 )
 
 // Fields required if preconfigured_app is not provided
-var customappSamlRequiredFields = []string{
+var customAppSamlRequiredFields = []string{
 	"sso_url",
 	"recipient",
 	"destination",
@@ -29,7 +27,6 @@ var customappSamlRequiredFields = []string{
 	"subject_name_id_format",
 	"signature_algorithm",
 	"digest_algorithm",
-	//"honor_force_authn",
 	"authn_context_class_ref",
 }
 
@@ -41,6 +38,25 @@ func resourceAppSaml() *schema.Resource {
 		DeleteContext: resourceAppSamlDelete,
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
+		},
+		CustomizeDiff: func(_ context.Context, d *schema.ResourceDiff, v interface{}) error {
+			jwks, ok := d.GetOk("attribute_statements")
+			if !ok {
+				return nil
+			}
+			for i := range jwks.([]interface{}) {
+				objType := d.Get(fmt.Sprintf("attribute_statements.%d.type", i)).(string)
+				if (d.Get(fmt.Sprintf("attribute_statements.%d.filter_type", i)).(string) != "" ||
+					d.Get(fmt.Sprintf("attribute_statements.%d.filter_value", i)).(string) != "") &&
+					objType != "GROUP" {
+					return errors.New("invalid 'attribute_statements': when setting 'filter_value' or 'filter_type', value of 'type' should be set to 'GROUP'")
+				}
+				if objType == "GROUP" &&
+					len(convertInterfaceToStringArrNullable(d.Get(fmt.Sprintf("attribute_statements.%d.values", i)))) > 0 {
+					return errors.New("invalid 'attribute_statements': when setting 'values', 'type' should be set to 'EXPRESSION'")
+				}
+			}
+			return nil
 		},
 		// For those familiar with Terraform schemas be sure to check the base application schema and/or
 		// the examples in the documentation
@@ -74,6 +90,11 @@ func resourceAppSaml() *schema.Resource {
 			"metadata": {
 				Type:        schema.TypeString,
 				Description: "SAML xml metadata payload",
+				Computed:    true,
+			},
+			"metadata_url": {
+				Type:        schema.TypeString,
+				Description: "SAML xml metadata URL",
 				Computed:    true,
 			},
 			"certificate": {
@@ -236,6 +257,10 @@ func resourceAppSaml() *schema.Resource {
 				Optional:    true,
 				Description: "features to enable",
 				Elem:        &schema.Schema{Type: schema.TypeString},
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					// always suppress diff since you can't currently configure provisioning features via the API
+					return true
+				},
 			},
 			"user_name_template": {
 				Type:        schema.TypeString,
@@ -275,15 +300,75 @@ func resourceAppSaml() *schema.Resource {
 				Type:     schema.TypeList,
 				Optional: true,
 				Elem: &schema.Resource{
-					Schema: attributeStatements,
+					Schema: map[string]*schema.Schema{
+						"filter_type": {
+							Type:             schema.TypeString,
+							Optional:         true,
+							Description:      "Type of group attribute filter",
+							ValidateDiagFunc: stringInSlice([]string{"STARTS_WITH", "EQUALS", "CONTAINS", "REGEX"}),
+						},
+						"filter_value": {
+							Type:        schema.TypeString,
+							Optional:    true,
+							Description: "Filter value to use",
+						},
+						"name": {
+							Type:        schema.TypeString,
+							Required:    true,
+							Description: "The reference name of the attribute statement",
+						},
+						"namespace": {
+							Type:     schema.TypeString,
+							Optional: true,
+							Default:  "urn:oasis:names:tc:SAML:2.0:attrname-format:unspecified",
+							ValidateDiagFunc: stringInSlice([]string{
+								"urn:oasis:names:tc:SAML:2.0:attrname-format:unspecified",
+								"urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
+								"urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+							}),
+							Description: "The name format of the attribute",
+						},
+						"type": {
+							Type:             schema.TypeString,
+							Optional:         true,
+							Default:          "EXPRESSION",
+							ValidateDiagFunc: stringInSlice([]string{"GROUP", "EXPRESSION"}),
+							Description:      "The type of attribute statements object",
+						},
+						"values": {
+							Type:     schema.TypeList,
+							Optional: true,
+							Elem:     &schema.Schema{Type: schema.TypeString},
+						},
+					},
 				},
+			},
+			"single_logout_issuer": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Description:      "The issuer of the Service Provider that generates the Single Logout request",
+				ValidateDiagFunc: stringIsURL(validURLSchemes...),
+				RequiredWith:     []string{"single_logout_url", "single_logout_certificate"},
+			},
+			"single_logout_url": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Description:      "The location where the logout response is sent",
+				ValidateDiagFunc: stringIsURL(validURLSchemes...),
+				RequiredWith:     []string{"single_logout_issuer", "single_logout_certificate"},
+			},
+			"single_logout_certificate": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				Description:  "x509 encoded certificate that the Service Provider uses to sign Single Logout requests",
+				RequiredWith: []string{"single_logout_issuer", "single_logout_url"},
 			},
 		}),
 	}
 }
 
 func resourceAppSamlCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	app, err := buildApp(d)
+	app, err := buildSamlApp(d)
 	if err != nil {
 		return diag.Errorf("failed to create SAML application: %v", err)
 	}
@@ -336,17 +421,17 @@ func resourceAppSamlRead(ctx context.Context, d *schema.ResourceData, m interfac
 	if app.Credentials.Signing.Kid != "" && app.Status != statusInactive {
 		keyID := app.Credentials.Signing.Kid
 		_ = d.Set("key_id", keyID)
-		keyMetadata, err := getSupplementFromMetadata(m).GetSAMLMetadata(ctx, d.Id(), keyID)
+		keyMetadata, metadataRoot, err := getSupplementFromMetadata(m).GetSAMLMetadata(ctx, d.Id(), keyID)
 		if err != nil {
-			return diag.Errorf("failed to set SAML metadata: %v", err)
+			return diag.Errorf("failed to get app's SAML metadata: %v", err)
+		}
+		var q string
+		if keyID != "" {
+			q = fmt.Sprintf("?kid=%s", keyID)
 		}
 		_ = d.Set("metadata", string(keyMetadata))
-
-		metadataRoot := &saml.EntityDescriptor{}
-		err = xml.Unmarshal(keyMetadata, metadataRoot)
-		if err != nil {
-			return diag.Errorf("could not parse SAML app metadata: %v", err)
-		}
+		_ = d.Set("metadata_url", fmt.Sprintf("%s/api/v1/apps/%s/sso/saml/metadata%s",
+			getOktaClientFromMetadata(m).GetConfig().Okta.Client.OrgUrl, d.Id(), q))
 		desc := metadataRoot.IDPSSODescriptors[0]
 		syncSamlEndpointBinding(d, desc.SingleSignOnServices)
 		uri := metadataRoot.EntityID
@@ -365,7 +450,7 @@ func resourceAppSamlRead(ctx context.Context, d *schema.ResourceData, m interfac
 
 func resourceAppSamlUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := getOktaClientFromMetadata(m)
-	app, err := buildApp(d)
+	app, err := buildSamlApp(d)
 	if err != nil {
 		return diag.Errorf("failed to create SAML application: %v", err)
 	}
@@ -398,7 +483,7 @@ func resourceAppSamlDelete(ctx context.Context, d *schema.ResourceData, m interf
 	return nil
 }
 
-func buildApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
+func buildSamlApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
 	// Abstracts away name and SignOnMode which are constant for this app type.
 	app := okta.NewSamlApplication()
 	app.Label = d.Get("label").(string)
@@ -414,7 +499,7 @@ func buildApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
 
 		reason := "Custom SAML applications must contain these fields"
 		// Need to verify the fields that are now required since it is not preconfigured
-		if err := conditionalRequire(d, customappSamlRequiredFields, reason); err != nil {
+		if err := conditionalRequire(d, customAppSamlRequiredFields, reason); err != nil {
 			return app, err
 		}
 
@@ -463,6 +548,18 @@ func buildApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
 		DigestAlgorithm:       d.Get("digest_algorithm").(string),
 		HonorForceAuthn:       &honorForce,
 		AuthnContextClassRef:  d.Get("authn_context_class_ref").(string),
+		Slo:                   &okta.SingleLogout{Enabled: boolPtr(false)},
+	}
+	sli := d.Get("single_logout_issuer").(string)
+	if sli != "" {
+		app.Settings.SignOn.Slo = &okta.SingleLogout{
+			Enabled:   boolPtr(true),
+			Issuer:    sli,
+			LogoutUrl: d.Get("single_logout_url").(string),
+		}
+		app.Settings.SignOn.SpCertificate = &okta.SpCertificate{
+			X5c: []string{d.Get("single_logout_certificate").(string)},
+		}
 	}
 	app.Credentials = &okta.ApplicationCredentials{
 		UserNameTemplate: &okta.ApplicationCredentialsUsernameTemplate{
@@ -512,10 +609,8 @@ func buildApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
 	}
 
 	if id, ok := d.GetOk("key_id"); ok {
-		app.Credentials = &okta.ApplicationCredentials{
-			Signing: &okta.ApplicationCredentialsSigning{
-				Kid: id.(string),
-			},
+		app.Credentials.Signing = &okta.ApplicationCredentialsSigning{
+			Kid: id.(string),
 		}
 	}
 
