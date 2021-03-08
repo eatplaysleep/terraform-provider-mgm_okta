@@ -91,37 +91,6 @@ func resourceAppOAuth() *schema.Resource {
 					return d.ForceNew("omit_secret")
 				}
 			}
-			if _, ok := d.GetOk("jwks"); !ok && d.Get("token_endpoint_auth_method").(string) == "private_key_jwt" {
-				return errors.New("'jwks' is required when 'token_endpoint_auth_method' is 'private_key_jwt'")
-			}
-			if d.Get("login_mode").(string) != "DISABLED" {
-				if d.Get("login_uri").(string) == "" {
-					return errors.New("you have to set up 'login_uri' to configure any 'login_mode' besides 'DISABLED'")
-				}
-				if len(convertInterfaceToStringSetNullable(d.Get("login_scopes"))) < 1 {
-					return errors.New("you have to set up 'login_scopes' to configure any 'login_mode' besides 'DISABLED'")
-				}
-			}
-			grantTypes := convertInterfaceToStringSet(d.Get("grant_types"))
-			hasImplicit := false
-			for _, v := range grantTypes {
-				if v == "implicit" {
-					hasImplicit = true
-					break
-				}
-			}
-			if hasImplicit {
-				hasTokenOrTokenID := false
-				for _, v := range convertInterfaceToStringSetNullable(d.Get("response_types")) {
-					if v == "token" || v == "id_token" {
-						hasTokenOrTokenID = true
-						break
-					}
-				}
-				if !hasTokenOrTokenID {
-					return errors.New("'response_types' must contain at least one of ['token', 'id_token'] when 'grant_types' contains 'implicit'")
-				}
-			}
 			return nil
 		},
 		// For those familiar with Terraform schemas be sure to check the base application schema and/or
@@ -343,6 +312,9 @@ func resourceAppOAuthCreate(ctx context.Context, d *schema.ResourceData, m inter
 	if err := validateGrantTypes(d); err != nil {
 		return diag.Errorf("failed to create OAuth application: %v", err)
 	}
+	if err := validateAppOAuth(d); err != nil {
+		return diag.Errorf("failed to create OAuth application: %v", err)
+	}
 	app := buildAppOAuth(d)
 	activate := d.Get("status").(string) == statusActive
 	params := &query.Params{Activate: &activate}
@@ -468,6 +440,9 @@ func resourceAppOAuthUpdate(ctx context.Context, d *schema.ResourceData, m inter
 	if err := validateGrantTypes(d); err != nil {
 		return diag.Errorf("failed to update OAuth application: %v", err)
 	}
+	if err := validateAppOAuth(d); err != nil {
+		return diag.Errorf("failed to create OAuth application: %v", err)
+	}
 	app := buildAppOAuth(d)
 	_, _, err := client.Application.UpdateApplication(ctx, d.Id(), app)
 	if err != nil {
@@ -575,7 +550,7 @@ func buildAppOAuth(d *schema.ResourceData) *okta.OpenIdConnectApplication {
 			TosUri:                 d.Get("tos_uri").(string),
 			IssuerMode:             d.Get("issuer_mode").(string),
 			IdpInitiatedLogin: &okta.OpenIdConnectApplicationIdpInitiatedLogin{
-				DefaultScope: convertInterfaceToStringSetNullable(d.Get("login_scopes")),
+				DefaultScope: convertInterfaceToStringSet(d.Get("login_scopes")),
 				Mode:         d.Get("login_mode").(string),
 			},
 		},
@@ -613,4 +588,40 @@ func validateGrantTypes(d *schema.ResourceData) error {
 
 	// There is some conditional validation around grant types depending on application type.
 	return conditionalValidator("grant_types", appType, appMap.RequiredGrantTypes, appMap.ValidGrantTypes, grantTypeList)
+}
+
+func validateAppOAuth(d *schema.ResourceData) error {
+	if _, ok := d.GetOk("jwks"); !ok && d.Get("token_endpoint_auth_method").(string) == "private_key_jwt" {
+		return errors.New("'jwks' is required when 'token_endpoint_auth_method' is 'private_key_jwt'")
+	}
+	if d.Get("login_mode").(string) != "DISABLED" {
+		if d.Get("login_uri").(string) == "" {
+			return errors.New("you have to set up 'login_uri' to configure any 'login_mode' besides 'DISABLED'")
+		}
+		if d.Get("login_mode").(string) == "OKTA" && len(convertInterfaceToStringSet(d.Get("login_scopes"))) < 1 {
+			return errors.New("you have to set up non-empty 'login_scopes' when 'login_mode' is 'OKTA'")
+		}
+	}
+	grantTypes := convertInterfaceToStringSet(d.Get("grant_types"))
+	hasImplicit := false
+	for _, v := range grantTypes {
+		if v == "implicit" {
+			hasImplicit = true
+			break
+		}
+	}
+	if !hasImplicit {
+		return nil
+	}
+	hasTokenOrTokenID := false
+	for _, v := range convertInterfaceToStringSetNullable(d.Get("response_types")) {
+		if v == "token" || v == "id_token" {
+			hasTokenOrTokenID = true
+			break
+		}
+	}
+	if !hasTokenOrTokenID {
+		return errors.New("'response_types' must contain at least one of ['token', 'id_token'] when 'grant_types' contains 'implicit'")
+	}
+	return nil
 }

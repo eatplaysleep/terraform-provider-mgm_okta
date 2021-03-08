@@ -6,7 +6,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
-	"github.com/oktadeveloper/terraform-provider-okta/sdk"
+	"github.com/okta/terraform-provider-okta/sdk"
 )
 
 // Predefined second authentication factors. They must be activated in order to use them in MFA policies.
@@ -42,6 +42,7 @@ func resourceFactor() *schema.Resource {
 					sdk.RsaTokenFactor,
 					sdk.SymantecVipFactor,
 					sdk.YubikeyTokenFactor,
+					sdk.HotpFactor,
 				}),
 				Description: "Factor provider ID",
 				ForceNew:    true,
