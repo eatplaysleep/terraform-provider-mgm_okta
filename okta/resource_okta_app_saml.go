@@ -39,25 +39,6 @@ func resourceAppSaml() *schema.Resource {
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
 		},
-		CustomizeDiff: func(_ context.Context, d *schema.ResourceDiff, v interface{}) error {
-			jwks, ok := d.GetOk("attribute_statements")
-			if !ok {
-				return nil
-			}
-			for i := range jwks.([]interface{}) {
-				objType := d.Get(fmt.Sprintf("attribute_statements.%d.type", i)).(string)
-				if (d.Get(fmt.Sprintf("attribute_statements.%d.filter_type", i)).(string) != "" ||
-					d.Get(fmt.Sprintf("attribute_statements.%d.filter_value", i)).(string) != "") &&
-					objType != "GROUP" {
-					return errors.New("invalid 'attribute_statements': when setting 'filter_value' or 'filter_type', value of 'type' should be set to 'GROUP'")
-				}
-				if objType == "GROUP" &&
-					len(convertInterfaceToStringArrNullable(d.Get(fmt.Sprintf("attribute_statements.%d.values", i)))) > 0 {
-					return errors.New("invalid 'attribute_statements': when setting 'values', 'type' should be set to 'EXPRESSION'")
-				}
-			}
-			return nil
-		},
 		// For those familiar with Terraform schemas be sure to check the base application schema and/or
 		// the examples in the documentation
 		Schema: buildAppSchema(map[string]*schema.Schema{
@@ -344,11 +325,10 @@ func resourceAppSaml() *schema.Resource {
 				},
 			},
 			"single_logout_issuer": {
-				Type:             schema.TypeString,
-				Optional:         true,
-				Description:      "The issuer of the Service Provider that generates the Single Logout request",
-				ValidateDiagFunc: stringIsURL(validURLSchemes...),
-				RequiredWith:     []string{"single_logout_url", "single_logout_certificate"},
+				Type:         schema.TypeString,
+				Optional:     true,
+				Description:  "The issuer of the Service Provider that generates the Single Logout request",
+				RequiredWith: []string{"single_logout_url", "single_logout_certificate"},
 			},
 			"single_logout_url": {
 				Type:             schema.TypeString,
@@ -368,6 +348,10 @@ func resourceAppSaml() *schema.Resource {
 }
 
 func resourceAppSamlCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+	err := validateAppSaml(d)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 	app, err := buildSamlApp(d)
 	if err != nil {
 		return diag.Errorf("failed to create SAML application: %v", err)
@@ -449,6 +433,10 @@ func resourceAppSamlRead(ctx context.Context, d *schema.ResourceData, m interfac
 }
 
 func resourceAppSamlUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+	err := validateAppSaml(d)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 	client := getOktaClientFromMetadata(m)
 	app, err := buildSamlApp(d)
 	if err != nil {
@@ -528,7 +516,7 @@ func buildSamlApp(d *schema.ResourceData) (*okta.SamlApplication, error) {
 		app.Settings.App = &settings
 	} else {
 		// we should provide empty app, even if there are no values
-		// see https://github.com/oktadeveloper/terraform-provider-okta/pull/226#issuecomment-744545051
+		// see https://github.com/okta/terraform-provider-okta/pull/226#issuecomment-744545051
 		settings := okta.ApplicationSettingsApplication(map[string]interface{}{})
 		app.Settings.App = &settings
 	}
@@ -643,5 +631,25 @@ func tryCreateCertificate(ctx context.Context, d *schema.ResourceData, m interfa
 		_ = d.Set("key_id", key.Kid)
 	}
 
+	return nil
+}
+
+func validateAppSaml(d *schema.ResourceData) error {
+	jwks, ok := d.GetOk("attribute_statements")
+	if !ok {
+		return nil
+	}
+	for i := range jwks.([]interface{}) {
+		objType := d.Get(fmt.Sprintf("attribute_statements.%d.type", i)).(string)
+		if (d.Get(fmt.Sprintf("attribute_statements.%d.filter_type", i)).(string) != "" ||
+			d.Get(fmt.Sprintf("attribute_statements.%d.filter_value", i)).(string) != "") &&
+			objType != "GROUP" {
+			return errors.New("invalid 'attribute_statements': when setting 'filter_value' or 'filter_type', value of 'type' should be set to 'GROUP'")
+		}
+		if objType == "GROUP" &&
+			len(convertInterfaceToStringArrNullable(d.Get(fmt.Sprintf("attribute_statements.%d.values", i)))) > 0 {
+			return errors.New("invalid 'attribute_statements': when setting 'values', 'type' should be set to 'EXPRESSION'")
+		}
+	}
 	return nil
 }

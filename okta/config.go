@@ -11,7 +11,7 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/logging"
 	"github.com/okta/okta-sdk-golang/v2/okta"
-	"github.com/oktadeveloper/terraform-provider-okta/sdk"
+	"github.com/okta/terraform-provider-okta/sdk"
 )
 
 func (adt *AddHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -73,7 +73,7 @@ func (c *Config) loadAndValidate() error {
 		okta.WithPrivateKey(c.privateKey),
 		okta.WithScopes(c.scopes),
 		okta.WithCache(false),
-		okta.WithHttpClient(*httpClient),
+		okta.WithHttpClientPtr(httpClient),
 		okta.WithRateLimitMaxBackOff(int64(c.maxWait)),
 		okta.WithRequestTimeout(int64(c.requestTimeout)),
 		okta.WithRateLimitMaxRetries(int32(c.retryCount)),
@@ -97,10 +97,10 @@ func (c *Config) loadAndValidate() error {
 }
 
 func errHandler(resp *http.Response, err error, numTries int) (*http.Response, error) {
-	defer resp.Body.Close()
 	if err != nil {
-		return nil, err
+		return resp, err
 	}
+	defer resp.Body.Close()
 	err = okta.CheckResponseForError(resp)
 	if err != nil {
 		oErr, ok := err.(*okta.Error)
@@ -115,20 +115,20 @@ func errHandler(resp *http.Response, err error, numTries int) (*http.Response, e
 
 type contextKey string
 
-const retryOnNotFoundKey contextKey = "retryOnNotFound"
+const retryOnStatusCodes contextKey = "retryOnStatusCodes"
 
-// Used to make http client retry on 404 response status code
+// Used to make http client retry on provided list of response status codes
 //
-// To enable this check, inject `retryOnNotFoundKey` key into the context with value == 'true'
-// 		ctx = context.WithValue(ctx, retryOnNotFoundKey, true)
+// To enable this check, inject `retryOnStatusCodes` key into the context with list of status codes you want to retry on
+// 		ctx = context.WithValue(ctx, retryOnStatusCodes, []int{404, 409})
 //
 func checkRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
 	// do not retry on context.Canceled or context.DeadlineExceeded
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
-	retry, ok := ctx.Value(retryOnNotFoundKey).(bool)
-	if ok && retry && resp != nil && resp.StatusCode == http.StatusNotFound {
+	retryCodes, ok := ctx.Value(retryOnStatusCodes).([]int)
+	if ok && resp != nil && containsInt(retryCodes, resp.StatusCode) {
 		return true, nil
 	}
 	return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
